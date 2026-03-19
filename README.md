@@ -321,42 +321,215 @@ python incident/incident_responder.py --alert ServiceDown --target payment-api -
 <!-- Section heading for the full getting-started sequence. -->
 
 ```bash
-# Step 1 — Clone the repository to your local machine or CI/CD server
+# ─────────────────────────────────────────────────────────────
+# STEP 1 — Clone and install
+# ─────────────────────────────────────────────────────────────
+
 git clone https://github.com/deepdevops/devops-automation
-# 'git clone' downloads the full repository including all scripts and history.
+# Downloads the full repository including all 12 scripts and history.
 
 cd devops-automation
-# Change into the project directory. All subsequent commands assume you are in this directory.
+# All commands below assume you are running from this directory.
 
-# Step 2 — Install all Python dependencies in one command
 pip install -r requirements.txt
-# 'pip install -r' reads requirements.txt and installs every listed package.
-# Main dependencies: boto3 (AWS SDK), kubernetes (K8s API client), requests (HTTP).
+# Installs all dependencies in one shot:
+# boto3 (AWS SDK), kubernetes (K8s API client), requests (HTTP calls).
 
-# Step 3 — Configure AWS credentials (required for all aws/ scripts)
+
+# ─────────────────────────────────────────────────────────────
+# STEP 2 — Configure AWS credentials (required for aws/ scripts)
+# ─────────────────────────────────────────────────────────────
+
 export AWS_ACCESS_KEY_ID=your_access_key_here
-# AWS_ACCESS_KEY_ID: The public half of your IAM user's access key. Never commit this to git.
+# The public half of your IAM user access key. Never hardcode or commit this.
 
 export AWS_SECRET_ACCESS_KEY=your_secret_key_here
-# AWS_SECRET_ACCESS_KEY: The private half. Treat this like a password — never log or print it.
+# The private half. Treat like a password — never log or print it.
 
 export AWS_DEFAULT_REGION=ap-south-1
-# AWS_DEFAULT_REGION: Which AWS region to use when no --region flag is passed.
-# ap-south-1 = Mumbai. Change to us-east-1, eu-west-1, etc. as needed.
+# Default region when no --region flag is passed. ap-south-1 = Mumbai.
+# Change to us-east-1, eu-west-1, etc. as needed.
 
-# Step 4 — Run the AWS cost optimizer
-python aws/cost_optimizer.py --region ap-south-1 --output report.csv
-# Scans ap-south-1 for idle/waste resources and writes a savings report to report.csv.
 
-# Step 5 — Run the Kubernetes cluster health check
+# ─────────────────────────────────────────────────────────────
+# AWS SCRIPTS
+# ─────────────────────────────────────────────────────────────
+
+# aws/cost_optimizer.py
+# Scans for idle EC2 instances, unattached EBS volumes, unused Elastic IPs,
+# and old snapshots. Outputs a CSV report with estimated monthly savings.
+python aws/cost_optimizer.py --region ap-south-1 --output cost_report.csv
+# --region   : AWS region to scan
+# --output   : Path for the CSV savings report
+# --dry-run  : Preview findings only, no changes made
+
+
+# aws/resource_inventory.py
+# Builds a complete inventory of 14 AWS resource types across a region or all regions.
+# Covers EC2, EBS, S3, RDS, Lambda, VPC, Subnets, SGs, IAM, ALB, ASG, CloudWatch, Route 53.
+python aws/resource_inventory.py --region ap-south-1 --output inventory.csv
+python aws/resource_inventory.py --all-regions --output full_inventory.json --format json
+# --region      : Single region to scan
+# --all-regions : Scan every available AWS region (takes longer)
+# --output      : Save results to CSV or JSON
+# --format      : csv (default) or json
+
+
+# aws/s3_lifecycle_enforcer.py
+# Audits all S3 buckets and applies Intelligent-Tiering → Glacier → expiry lifecycle policies.
+# Also aborts incomplete multipart uploads (a common silent cost leak).
+python aws/s3_lifecycle_enforcer.py --dry-run
+# Always run dry-run first to preview which buckets will be updated.
+python aws/s3_lifecycle_enforcer.py --apply
+# --apply  : Actually write lifecycle configs to all buckets
+python aws/s3_lifecycle_enforcer.py --apply --bucket my-specific-bucket
+# --bucket : Limit to a single named bucket — useful for testing first
+
+
+# ─────────────────────────────────────────────────────────────
+# KUBERNETES SCRIPTS
+# ─────────────────────────────────────────────────────────────
+
+# kubernetes/cluster_health_check.py
+# Checks node status, CrashLoopBackOff pods, failed deployments, unbound PVCs,
+# and HPA saturation. Exits code 1 on CRITICAL — safe to use as a CI/CD gate.
+python kubernetes/cluster_health_check.py
+# No arguments: scans ALL namespaces in your active kubeconfig context.
 python kubernetes/cluster_health_check.py --namespace production
-# Runs all health checks against the 'production' namespace in your active kubeconfig context.
-# Exit code 0 = all clear. Exit code 1 = one or more CRITICAL issues found.
+# --namespace : Limit scan to one namespace (recommended before deploying)
+python kubernetes/cluster_health_check.py --namespace production --output health.json
+# --output    : Save full JSON report for dashboards or ticketing systems
+echo $?
+# Exit code 0 = all healthy. Exit code 1 = one or more CRITICAL issues found.
 
-# Step 6 — Track SLO error budget for a service
-python observability/slo_tracker.py --service payment-api --window 30d
-# Queries Prometheus for 'payment-api' SLI metrics over the last 30 days.
-# Reports: availability %, p99 latency, error rate, and % of error budget remaining.
+
+# kubernetes/pod_resource_auditor.py
+# Audits every pod for missing resource requests/limits, OOMKill history,
+# high restart counts, CrashLoopBackOff, ImagePullBackOff, and memory headroom risks.
+python kubernetes/pod_resource_auditor.py --namespace production
+# Shows only pods with problems (default).
+python kubernetes/pod_resource_auditor.py --namespace production --show-all
+# --show-all : Include healthy pods in output as well
+python kubernetes/pod_resource_auditor.py --namespace production --output pod_audit.json
+# --output   : Save full audit as JSON for further processing
+
+
+# ─────────────────────────────────────────────────────────────
+# TERRAFORM SCRIPTS
+# ─────────────────────────────────────────────────────────────
+
+# terraform/state_backup.py
+# Backs up .tfstate files to S3 with SHA256 integrity verification.
+# Enforces retention policy — keeps last N backups, deletes older ones.
+python terraform/state_backup.py --state-dir ./infra --bucket my-tf-backups --dry-run
+# Always dry-run first to see which files would be backed up.
+python terraform/state_backup.py --state-dir ./infra --bucket my-tf-backups --apply
+# --state-dir  : Root directory to recursively find all .tfstate files
+# --bucket     : S3 bucket to store backups in
+# --apply      : Perform the actual upload (each file timestamped for versioning)
+python terraform/state_backup.py --state-dir ./infra --bucket my-tf-backups --apply --retain 30
+# --retain     : Keep last N backups per state file (default: 10)
+python terraform/state_backup.py --state-dir ./infra --bucket my-tf-backups --apply --slack-webhook https://hooks.slack.com/...
+# --slack-webhook : Post success/failure summary to Slack after each run
+# Tip: add this to a Jenkins stage or cron job that runs before every terraform apply.
+
+
+# terraform/drift_detector.py
+# Compares .tfstate files against live AWS resources to detect manual changes
+# made in the console or CLI that Terraform doesn't know about.
+python terraform/drift_detector.py --state-file terraform.tfstate --region ap-south-1
+# --state-file : Path to a single .tfstate file
+python terraform/drift_detector.py --state-dir ./infra --region ap-south-1 --output drift.json
+# --state-dir  : Recursively scan a directory for all .tfstate files
+# --output     : Save JSON drift report
+# --region     : AWS region to compare against (default: ap-south-1)
+# Exit code 1 if CRITICAL drift found (e.g. deleted resources, changed security group rules).
+
+
+# ─────────────────────────────────────────────────────────────
+# CI/CD SCRIPTS
+# ─────────────────────────────────────────────────────────────
+
+# cicd/jenkins_pipeline_monitor.py
+# Polls Jenkins API for failed, unstable, or hung builds across all jobs.
+# Calculates failure rate trend over last 5 builds per job.
+python cicd/jenkins_pipeline_monitor.py --url http://jenkins:8080 --token YOUR_API_TOKEN
+# --url    : Jenkins base URL
+# --token  : Jenkins API token (generate at: Jenkins → User → Configure → API Token)
+# --user   : Jenkins username (default: admin)
+python cicd/jenkins_pipeline_monitor.py --url http://jenkins:8080 --token TOKEN --job-filter "deploy-"
+# --job-filter     : Only check jobs whose names start with this prefix
+python cicd/jenkins_pipeline_monitor.py --url http://jenkins:8080 --token TOKEN --hung-threshold 60 --slack-webhook https://hooks.slack.com/...
+# --hung-threshold : Minutes before a still-running build is flagged as hung (default: 60)
+# --slack-webhook  : Send colour-coded Slack alert with build links on failure
+# Exit code 1 if any FAILURE found — use as a pipeline health-gate stage.
+
+
+# cicd/deployment_notifier.py
+# Posts structured deployment event notifications to Slack at each pipeline stage.
+# Auto-detects git commit hash, branch, and author from the local repo.
+python cicd/deployment_notifier.py --event started  --service payment-api --env production --version v2.4.1
+# Call at the START of a deployment pipeline stage.
+python cicd/deployment_notifier.py --event success  --service payment-api --env production --version v2.4.1
+# Call when the deployment SUCCEEDS.
+python cicd/deployment_notifier.py --event failure  --service payment-api --env production --version v2.4.1 --reason "Health check failed after 3 retries"
+# Call when the deployment FAILS. --reason explains what went wrong.
+python cicd/deployment_notifier.py --event rollback --service payment-api --env production --version v2.4.0 --reason "Reverted due to p99 latency spike"
+# Call when triggering a ROLLBACK. --version should be the version rolled back TO.
+# --webhook : Slack webhook URL (or set SLACK_WEBHOOK env var)
+# --build-url : Link to the CI build logs added to the Slack message
+
+
+# ─────────────────────────────────────────────────────────────
+# OBSERVABILITY SCRIPTS
+# ─────────────────────────────────────────────────────────────
+
+# observability/slo_tracker.py
+# Queries Prometheus to compute SLI metrics and report SLO compliance.
+# Calculates availability %, p99 latency, error rate, and remaining error budget.
+python observability/slo_tracker.py --prometheus http://prometheus:9090 --service payment-api
+# --prometheus : Prometheus server URL
+# --service    : Value of the 'service' label in your Prometheus metrics
+python observability/slo_tracker.py --prometheus http://prometheus:9090 --service payment-api --window 7d
+# --window     : Lookback window — 24h (daily), 7d (weekly), 30d (monthly SLO review)
+python observability/slo_tracker.py --prometheus http://prometheus:9090 --service payment-api --slo-target 99.95
+# --slo-target : Availability target % (default: 99.9). Use 99.95 for critical services.
+python observability/slo_tracker.py --prometheus http://prometheus:9090 --all-services
+# --all-services : Auto-discovers all services in Prometheus and reports on each
+
+
+# observability/alert_aggregator.py
+# Fetches all active Alertmanager alerts, deduplicates noisy multi-instance alerts,
+# groups by severity, and posts a clean daily digest to Slack.
+python observability/alert_aggregator.py --alertmanager http://alertmanager:9093
+# --alertmanager : Alertmanager base URL (v2 API)
+python observability/alert_aggregator.py --alertmanager http://alertmanager:9093 --slack-webhook https://hooks.slack.com/...
+# --slack-webhook : Send the digest as a colour-coded Slack message
+python observability/alert_aggregator.py --alertmanager http://alertmanager:9093 --output daily_alerts.json
+# --output : Save full deduplicated alert list as JSON
+# Tip: run on a daily cron job for a morning alert digest — reduces alert fatigue.
+
+
+# ─────────────────────────────────────────────────────────────
+# INCIDENT SCRIPT
+# ─────────────────────────────────────────────────────────────
+
+# incident/incident_responder.py
+# Automated first-response playbook triggered on alerts.
+# Runs diagnostics, attempts safe auto-remediation, posts report to Slack.
+python incident/incident_responder.py --alert HighCPU      --target payment-api --namespace production
+# Collects kubectl top, checks HPA, tails logs, bumps HPA max-replicas if possible.
+python incident/incident_responder.py --alert HighMemory   --target payment-api --namespace production
+# Checks memory limits and OOMKill history, flags for manual limit increase.
+python incident/incident_responder.py --alert ServiceDown  --target payment-api --namespace production
+# Checks endpoints and replicas, triggers rolling restart if 0 replicas available.
+python incident/incident_responder.py --alert DiskPressure --target node-1
+# Describes node, lists all pods on it, provides cleanup commands.
+python incident/incident_responder.py --alert ServiceDown --target payment-api --namespace production --slack-webhook https://hooks.slack.com/...
+# --alert          : Playbook to run — HighCPU | HighMemory | ServiceDown | DiskPressure
+# --target         : Pod name, deployment name, or node name the alert fired for
+# --namespace      : Kubernetes namespace (default: default)
+# --slack-webhook  : Post full incident report to Slack after playbook completes
 ```
 
 ---
